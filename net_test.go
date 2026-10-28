@@ -240,6 +240,34 @@ func TestListenUDPInPortRange_BailsOnEADDRNOTAVAIL(t *testing.T) {
 	require.Equal(t, 1, captor.attempts)
 }
 
+func TestListenUDPInPortRange_BailsOnInterfaceGone(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("ENODEV and EINVAL are only treated as address-level errors on unix")
+	}
+
+	base, err := stdnet.NewNet()
+	require.NoError(t, err)
+
+	logger := logging.NewDefaultLoggerFactory().NewLogger("ice-test")
+
+	for _, errno := range []syscall.Errno{syscall.ENODEV, syscall.EINVAL} {
+		sysErr := &net.OpError{Op: "listen", Net: "udp", Err: &os.SyscallError{Syscall: "bind", Err: errno}}
+		captor := &listenUDPErrorCaptor{Net: base, err: sysErr}
+
+		_, err = listenUDPInPortRange(
+			captor,
+			logger,
+			1200, // portMax
+			1100, // portMin
+			udp6,
+			&net.UDPAddr{IP: net.ParseIP("fe80::1"), Zone: "eth9", Port: 0},
+		)
+
+		require.Error(t, err)
+		require.Equal(t, 1, captor.attempts, errno.Error())
+	}
+}
+
 func TestListenUDPInPortRange_ContinuesOnPortBusyError(t *testing.T) {
 	base, err := stdnet.NewNet()
 	require.NoError(t, err)
@@ -285,6 +313,34 @@ func TestListenUDPInPortRange_RealEADDRNOTAVAIL(t *testing.T) {
 
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrPort)
+}
+
+func TestListenUDPInPortRange_RealRemovedInterface(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("errno for a link-local bind on a missing interface is linux specific")
+	}
+
+	base, err := stdnet.NewNet()
+	require.NoError(t, err)
+
+	logger := logging.NewDefaultLoggerFactory().NewLogger("ice-test")
+
+	// A zone that names a missing interface fails with EINVAL; one with a
+	// missing interface index fails with ENODEV. This is what an interface
+	// snapshot taken before a container (veth) was removed looks like.
+	for _, zone := range []string{"pion-gone0", "99999"} {
+		_, err = listenUDPInPortRange(
+			base,
+			logger,
+			5100, // portMax
+			5000, // portMin
+			udp6,
+			&net.UDPAddr{IP: net.ParseIP("fe80::1"), Zone: zone, Port: 0},
+		)
+
+		require.Error(t, err, zone)
+		require.NotErrorIs(t, err, ErrPort, zone)
+	}
 }
 
 func TestListenUDPInPortRange_DefaultsPortMaxToFFFF(t *testing.T) {
